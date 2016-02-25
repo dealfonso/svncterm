@@ -1,3 +1,26 @@
+Simple VNC terminal emulator
+
+2016-02
+
+Simplifications from the original vncterm, to remove tls requirements thus
+enabling the usage of non-patched versions of libvncserver and others.
+
+IMPORTANT: In this version there is not any need for patches for the external libraries.
+
+* Compile this app
+DEBIAN_FRONTEND=noninteractive apt-get install make build-essential zlib1g-dev console-data quilt libgnutls-dev libjpeg-dev
+git clone https://github.com/dealfonso/svncterm
+cd svncterm/
+make
+
+* Make the redistributable .deb file by using this command:
+$ make deb
+
+* Original version
+https://github.com/proxmox/vncterm
+
+---------------------------------------------------------------------------
+
 Simple VNC terminal emulator (inspired by VncCommand)
 
 We try to simulate a 'xterm', because we want to support:

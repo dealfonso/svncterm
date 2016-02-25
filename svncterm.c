@@ -1,4 +1,6 @@
 /*
+     Copyright (C) 2006 Universitat Politecnica de Valencia
+     * Removing the usage of TLS and the need of patched versions of libraries
 
      Copyright (C) 2007-2011 Proxmox Server Solutions GmbH
 
@@ -38,270 +40,13 @@
 #include <signal.h>
 #include <locale.h>
 
-#include "vncterm.h"
+#include "svncterm.h"
 #include "glyphs.h"
-
-#include <gnutls/gnutls.h>
-#include <gnutls/x509.h>
 
 /* define this for debugging */
 //#define DEBUG
 
-char *auth_path = "/";
-char *auth_perm = "Sys.Console";
-
-int use_x509 = 1;
-
-static char *
-urlencode(char *buf, const char *value)
-{
-	static const char *hexchar = "0123456789abcdef";
-	char *p = buf;
-	int i;
-	int l = strlen(value);
-	for (i = 0; i < l; i++) {
-		char c = value[i];
-		if (('a' <= c && c <= 'z') ||
-		    ('A' <= c && c <= 'Z') ||
-		    ('0' <= c && c <= '9')) {
-			*p++ = c;
-		} else if (c == 32) {
-			*p++ = '+';
-		} else {
-			*p++ = '%';
-			*p++ = hexchar[c >> 4];
-			*p++ = hexchar[c & 15];
-		}
-	}
-	*p = 0;
-
-	return p;
-}
-
-static int 
-pve_auth_verify(const char *clientip, const char *username, const char *passwd)
-{
-	struct sockaddr_in server;
-
-	int sfd = socket(AF_INET, SOCK_STREAM, 0);
-	if (sfd == -1) {
-		perror("pve_auth_verify: socket failed");
-		return -1;
-	}
-
-	struct hostent *he;
-	if ((he = gethostbyname("localhost")) == NULL) {
-		fprintf(stderr, "pve_auth_verify: error resolving hostname\n");
-		goto err;
-	}
-
-	memcpy(&server.sin_addr, he->h_addr_list[0], he->h_length);
-	server.sin_family = AF_INET;
-	server.sin_port = htons(85);
-
-	if (connect(sfd, (struct sockaddr *)&server, sizeof(server))) {
-		perror("pve_auth_verify: error connecting to server");
-		goto err;
-	}
-
-	char buf[8192];
-	char form[8192];
-
-	char *p = form;
-	p = urlencode(p, "username");
-	*p++ = '=';
-	p = urlencode(p, username);
-
-	*p++ = '&';
-	p = urlencode(p, "password");
-	*p++ = '=';
-	p = urlencode(p, passwd);
-
- 	*p++ = '&';
-	p = urlencode(p, "path");
-	*p++ = '=';
-	p = urlencode(p, auth_path);
-
- 	*p++ = '&';
- 	p = urlencode(p, "privs");
-	*p++ = '=';
- 	p = urlencode(p, auth_perm);
-
-	sprintf(buf, "POST /api2/json/access/ticket HTTP/1.1\n"
-		"Host: localhost:85\n"
-		"Connection: close\n"
-		"PVEClientIP: %s\n"
-		"Content-Type: application/x-www-form-urlencoded\n"
-		"Content-Length: %zd\n\n%s\n", clientip, strlen(form), form);
-	ssize_t len = strlen(buf);
-	ssize_t sb = send(sfd, buf, len, 0);
-	if (sb < 0) {
-		perror("pve_auth_verify: send failed");
-		goto err;
-	}
-	if (sb != len) {
-		fprintf(stderr, "pve_auth_verify: partial send error\n");
-		goto err;
-	}
-
-	len = recv(sfd, buf, sizeof(buf) - 1, 0);
-	if (len < 0) {
-		perror("pve_auth_verify: recv failed");
-		goto err;
-	}
-
-	buf[len] = 0;
-
-	//printf("DATA:%s\n", buf);
-
-	shutdown(sfd, SHUT_RDWR);
-
-	return strncmp(buf, "HTTP/1.1 200 OK", 15);
-
-err:
-	shutdown(sfd, SHUT_RDWR);
-	return -1;
-}
-
-#ifdef DEBUG
-static void vnc_debug_gnutls_log(int level, const char* str) {
-	fprintf(stderr, "%d %s", level, str);
-}
-#endif
-
 #define DH_BITS 1024
-static gnutls_dh_params_t dh_params;
-
-typedef struct {
-	gnutls_session_t session;
-} tls_client_t;
-
-static ssize_t
-vnc_tls_push(
-	gnutls_transport_ptr_t transport,
-	const void *data,
-	size_t len)
-{
-	rfbClientPtr cl = (rfbClientPtr)transport;
-	int n;
-
-retry:
-	n = send(cl->sock, data, len, 0);
-	if (n < 0) {
-		if (errno == EINTR)
-			goto retry;
-		return -1;
-	}
-	return n;
-}
-
-static ssize_t
-vnc_tls_pull(
-	gnutls_transport_ptr_t transport,
-	void *data,
-	size_t len)
-{
-	rfbClientPtr cl = (rfbClientPtr)transport;
-	int n;
-
-retry:
- 	n = recv(cl->sock, data, len, 0);
-	if (n < 0) {
-		if (errno == EINTR)
-			goto retry;
-		return -1;
-	}
-	return n;
-}
-
-ssize_t vnc_tls_read(rfbClientPtr cl, void *buf, size_t count)
-{
-	tls_client_t *sd = (tls_client_t *)cl->clientData;
-
-        int ret = gnutls_read(sd->session, buf, count);
-        if (ret < 0) {
-		if (ret == GNUTLS_E_AGAIN)
-			errno = EAGAIN;
-		else
-			errno = EIO;
-		ret = -1;
-        }
-
-	return ret;
-}
-ssize_t vnc_tls_write(rfbClientPtr cl, void *buf, size_t count)
-{
-	tls_client_t *sd = (tls_client_t *)cl->clientData;
-
-        int ret = gnutls_write(sd->session, buf, count);
-        if (ret < 0) {
-		if (ret == GNUTLS_E_AGAIN)
-			errno = EAGAIN;
-		else
-			errno = EIO;
-		ret = -1;
-        }
-
-	return ret;
-}
-
-static gnutls_anon_server_credentials
-tls_initialize_anon_cred(void)
-{
-	gnutls_anon_server_credentials anon_cred;
-	int ret;
-
-	if ((ret = gnutls_anon_allocate_server_credentials(&anon_cred)) < 0) {
-		rfbLog("can't allocate credentials: %s\n", gnutls_strerror(ret));
-		return NULL;
-	}
-
-	gnutls_anon_set_server_dh_params(anon_cred, dh_params);
-
-	return anon_cred;
-}
-
-static gnutls_certificate_credentials_t 
-tls_initialize_x509_cred(void)
-{
-	gnutls_certificate_credentials_t x509_cred;
-	int ret;
-
-	/* Paths to x509 certs/keys */
-	char *x509cacert = "/etc/pve/pve-root-ca.pem";
-	char *x509cert = "/etc/pve/local/pve-ssl.pem";
-	char *x509key = "/etc/pve/local/pve-ssl.key";
-
-	if ((ret = gnutls_certificate_allocate_credentials(&x509_cred)) < 0) {
-		rfbLog("can't allocate credentials: %s\n", gnutls_strerror(ret));
-		return NULL;
-	}
-
-	if ((ret = gnutls_certificate_set_x509_trust_file
-	     (x509_cred, x509cacert, GNUTLS_X509_FMT_PEM)) < 0) {
-		rfbLog("can't load CA certificate: %s\n", gnutls_strerror(ret));
-		gnutls_certificate_free_credentials(x509_cred);
-		return NULL;
-	}
-
-	if ((ret = gnutls_certificate_set_x509_key_file 
-	     (x509_cred, x509cert, x509key, GNUTLS_X509_FMT_PEM)) < 0) {
-		rfbLog("can't load certificate & key: %s\n", gnutls_strerror(ret));
-		gnutls_certificate_free_credentials(x509_cred);
-		return NULL;
-	}
-
-	gnutls_certificate_set_dh_params (x509_cred, dh_params);
-
-	return x509_cred;
-}
-
-/* rfb tls security handler */
-
-#define rfbSecTypeVencrypt  19
-#define rfbVencryptTlsPlain 259
-#define rfbVencryptX509Plain 262
-
 void rfbEncodeU32(char *buf, uint32_t value)
 {
     buf[0] = (value >> 24) & 0xFF;
@@ -315,281 +60,6 @@ uint32_t rfbDecodeU32(char *data, size_t offset)
 	return ((data[offset] << 24) | (data[offset + 1] << 16) |
 		(data[offset + 2] << 8) | data[offset + 3]);
 }
-
-static void
-vencrypt_subauth_plain(rfbClientPtr cl)
-{
-	const char *err = NULL;
-	char buf[4096];
-	int n;
-
-	char clientip[INET6_ADDRSTRLEN];
-	clientip[0] = 0;
-	struct sockaddr_in client;
-	socklen_t addrlen = sizeof(client);
-	if (getpeername(cl->sock, &client, &addrlen) == 0) {
-		inet_ntop(client.sin_family, &client.sin_addr, 
-			  clientip, sizeof(clientip));
-	}
-
-	if ((n = rfbReadExact(cl, buf, 8)) <= 0) {
-		err = n ? "read failed" : "client gone";
-		goto err;
-	}
-
-	uint32_t ulen = rfbDecodeU32(buf, 0);
-	uint32_t pwlen = rfbDecodeU32(buf, 4);
-
-	if (!ulen) {
-		err = "No User name.";
-		goto err;
-	}
-	if (ulen >= 255) {
-		err = "User name too long.";
-		goto err;
-	}
-	if (!pwlen) {
-		err = "Password too short";
-		goto err;
-	}
-	if (pwlen >= 511) {
-		err = "Password too long.";
-		goto err;
-	}
-
-	if ((n = rfbReadExact(cl, buf, ulen)) <= 0) {
-		err = n ? "read failed" : "client gone";
-		goto err;
-	}
-	buf[ulen] = 0;
-	char *username = buf;
-	char *passwd = buf + ulen + 1;
-	if ((n = rfbReadExact(cl, passwd, pwlen)) <= 0) {
-		err = n ? "read failed" : "client gone";
-		goto err;
-	}
-	passwd[pwlen] = 0;
-
-	rfbLog("VencryptPlain: username: %s pw: %s\n", username, passwd);
-
-	if (pve_auth_verify(clientip, username, passwd) == 0) {
-		rfbEncodeU32(buf, 0); /* Accept auth completion */
-		rfbWriteExact(cl, buf, 4);
-		cl->state = RFB_INITIALISATION;
-		return;
-	}
-
-	err = "Authentication failed";
-err:
-	rfbLog("VencryptPlain: %s\n", err ? err : "no reason specified");
-	if (err) {
-		rfbEncodeU32(buf, 1); /* Reject auth */
-		rfbWriteExact(cl, buf, 4);
-		if (cl->protocolMinorVersion >= 8) {
-			int elen = strlen(err);
-			rfbEncodeU32(buf, elen);
-			rfbWriteExact(cl, buf, 4);
-			rfbWriteExact(cl, err, elen);
-		}
-	}
-	rfbCloseClient(cl);
-	return;
-}
-
-static void
-rfbVncAuthVencrypt(rfbClientPtr cl)
-{
-	int ret;
-
-	/* Send VeNCrypt version 0.2 */
-	char buf[256];
-	buf[0] = 0;
-	buf[1] = 2;
-
-	if (rfbWriteExact(cl, buf, 2) < 0) {
-            rfbLogPerror("rfbVncAuthVencrypt: write");
-            rfbCloseClient(cl);
-            return;
-	}
-
-	int n = rfbReadExact(cl, buf, 2);
-	if (n <= 0) {
-		if (n == 0)
-			rfbLog("rfbVncAuthVencrypt: client gone\n");
-		else
-			rfbLogPerror("rfbVncAuthVencrypt: read");
-		rfbCloseClient(cl);
-		return;
-	}
-
-	if (buf[0] != 0 || buf[1] != 2) {
-		rfbLog("Unsupported VeNCrypt protocol %d.%d\n",
-		       (int)buf[0], (int)buf[1]);
-		buf[0] = 1; /* Reject version */
-		rfbWriteExact(cl, buf, 1);
-		rfbCloseClient(cl);
-		return;
-	}
-
-	/* Sending allowed auth */
-	int req_auth = use_x509 ? rfbVencryptX509Plain : rfbVencryptTlsPlain;
-
-	buf[0] = 0; /* Accept version */
-	buf[1] = 1; /* number of sub auths */
-	rfbEncodeU32(buf+2, req_auth);
-	if (rfbWriteExact(cl, buf, 6) < 0) {
-		rfbLogPerror("rfbVncAuthVencrypt: write");
-		rfbCloseClient(cl);
-		return;
-	}
-
-	n = rfbReadExact(cl, buf, 4);
-	if (n <= 0) {
-		if (n == 0)
-			rfbLog("rfbVncAuthVencrypt: client gone\n");
-		else
-			rfbLogPerror("rfbVncAuthVencrypt: read");
-		rfbCloseClient(cl);
-		return;
-	}
-
-	int auth = rfbDecodeU32(buf, 0);
-	if (auth != req_auth) {
-		buf[0] = 1; /* Reject auth*/
-		rfbWriteExact(cl, buf, 1);
-		rfbCloseClient(cl);
-		return;
-	}
-
-	buf[0] = 1; /* Accept auth */
-	if (rfbWriteExact(cl, buf, 1) < 0) {
-		rfbLogPerror("rfbVncAuthVencrypt: write");
-		rfbCloseClient(cl);
-		return;
-	}
-
-	tls_client_t *sd = calloc(1, sizeof(tls_client_t));
-
-	if (sd->session == NULL) {
-		if (gnutls_init(&sd->session, GNUTLS_SERVER) < 0) {
-			rfbLog("gnutls_init failed\n");
-			rfbCloseClient(cl);
-			return;
-
-		}
-
-		if ((ret = gnutls_set_default_priority(sd->session)) < 0) {
-			rfbLog("gnutls_set_default_priority failed: %s\n", gnutls_strerror(ret));
-			sd->session = NULL;
-			rfbCloseClient(cl);
-			return;
-		}
-
-		/* optimize for speed */
-		static const int cipher_priority_performance[] = {
-			GNUTLS_CIPHER_ARCFOUR_128,
-			GNUTLS_CIPHER_AES_128_CBC,
-			GNUTLS_CIPHER_3DES_CBC, 0
-		};
-
-		if ((ret = gnutls_cipher_set_priority(sd->session, cipher_priority_performance)) < 0) {
-			rfbLog("gnutls_cipher_set_priority failed: %s\n", gnutls_strerror(ret));
-			sd->session = NULL;
-			rfbCloseClient(cl);
-			return;
-		}
-
-		static const int kx_anon[] = {GNUTLS_KX_ANON_DH, 0};
-		static const int kx_x509[] = {GNUTLS_KX_DHE_DSS, GNUTLS_KX_RSA, GNUTLS_KX_DHE_RSA, GNUTLS_KX_SRP, 0};
-		if ((ret = gnutls_kx_set_priority(sd->session, use_x509 ? kx_x509 : kx_anon)) < 0) {
-			rfbLog("gnutls_kx_set_priority failed: %s\n", gnutls_strerror(ret));
-			sd->session = NULL;
-			rfbCloseClient(cl);
-			return;
-		}
-
-		static const int cert_type_priority[] = { GNUTLS_CRT_X509, 0 };
-		if ((ret = gnutls_certificate_type_set_priority(sd->session, cert_type_priority)) < 0) {
-			rfbLog("gnutls_certificate_type_set_priority failed: %s\n",
-			       gnutls_strerror(ret));
-			sd->session = NULL;
-			rfbCloseClient(cl);
-			return;
-		}
-
-		static const int protocol_priority[]= { GNUTLS_TLS1_1, GNUTLS_TLS1_0, GNUTLS_SSL3, 0 };
-		if ((ret = gnutls_protocol_set_priority(sd->session, protocol_priority)) < 0) {
-			rfbLog("gnutls_protocol_set_priority failed: %s\n",
-			       gnutls_strerror(ret));
-			sd->session = NULL;
-			rfbCloseClient(cl);
-			return;
-		}
-
-		if (use_x509) {
-			gnutls_certificate_server_credentials x509_cred;
-			
-			if (!(x509_cred = tls_initialize_x509_cred())) {
-				sd->session = NULL;
-				rfbCloseClient(cl);
-				return;
-			}
- 
-			if (gnutls_credentials_set(sd->session, GNUTLS_CRD_CERTIFICATE, x509_cred) < 0) {
-				sd->session = NULL;
-				gnutls_certificate_free_credentials(x509_cred);
-				rfbCloseClient(cl);
-				return;
-			}
-			
-		} else {
-			gnutls_anon_server_credentials anon_cred;
-
-			if (!(anon_cred = tls_initialize_anon_cred())) {
-				sd->session = NULL;
-				rfbCloseClient(cl);
-				return;
-			}
-
-			if ((ret = gnutls_credentials_set(sd->session, GNUTLS_CRD_ANON, anon_cred)) < 0) {
-				rfbLog("gnutls_credentials_set failed: %s\n", gnutls_strerror(ret));
-				gnutls_anon_free_server_credentials(anon_cred);
-				sd->session = NULL;
-				rfbCloseClient(cl);
-				return;
-			}
-		}
-
-		gnutls_transport_set_ptr(sd->session, (gnutls_transport_ptr_t)cl);
-		gnutls_transport_set_push_function(sd->session, vnc_tls_push);
-		gnutls_transport_set_pull_function(sd->session, vnc_tls_pull);
-	}
-
-
-retry:
-	if ((ret = gnutls_handshake(sd->session)) < 0) {
-		if (!gnutls_error_is_fatal(ret)) {
-			usleep(100000);
-			goto retry;
-		}
-		rfbLog("rfbVncAuthVencrypt: handshake failed\n");
-		rfbCloseClient(cl);
-		return;
-	}
-
-	/* set up TLS read/write hooks */
-	cl->clientData = sd;
-	cl->sock_read_fn = &vnc_tls_read;
-	cl->sock_write_fn = &vnc_tls_write;
-
-	vencrypt_subauth_plain(cl);
-}
-
-static rfbSecurityHandler VncSecurityHandlerVencrypt = {
-    rfbSecTypeVencrypt,
-    rfbVncAuthVencrypt,
-    NULL
-};
 
 #define TERM "xterm"
 
@@ -2196,8 +1666,6 @@ new_client (rfbClientPtr client)
   return RFB_CLIENT_ACCEPT;
 }
 
-static char *vncticket = NULL;
-
 vncTerm *
 create_vncterm (int argc, char** argv, int maxx, int maxy)
 {
@@ -2205,8 +1673,6 @@ create_vncterm (int argc, char** argv, int maxx, int maxy)
 
   rfbScreenInfoPtr screen = rfbGetScreen (&argc, argv, maxx, maxy, 8, 1, 1);
   screen->frameBuffer=(char*)calloc(maxx*maxy, 1);
-
-  char **passwds = calloc(sizeof(char**), 2);
 
   vncTerm *vt = (vncTerm *)calloc (sizeof(vncTerm), 1);
 
@@ -2276,16 +1742,6 @@ create_vncterm (int argc, char** argv, int maxx, int maxy)
 
   //screen->autoPort = 1;
 
-  if (vncticket) {
-      passwds[0] = vncticket;
-      passwds[1] = NULL;
-  
-      screen->authPasswdData = (void *)passwds;
-      screen->passwordCheck = rfbCheckPasswordByList;
-  } else {
-      rfbRegisterSecurityHandler(&VncSecurityHandlerVencrypt);
-  }
-
   rfbInitServer(screen);
 
   return vt;
@@ -2305,21 +1761,6 @@ main (int argc, char** argv)
   time_t elapsed, cur_time;
   struct winsize dimensions;
 
-  if (gnutls_global_init () < 0) {
-	  fprintf(stderr, "gnutls_global_init failed\n");
-	  exit(-1);
-  }
-
-  if (gnutls_dh_params_init (&dh_params) < 0) {
-	  fprintf(stderr, "gnutls_dh_params_init failed\n");
-	  exit(-1);
-  }
-
-  if (gnutls_dh_params_generate2 (dh_params, DH_BITS) < 0) {
-	  fprintf(stderr, "gnutls_dh_params_init failed\n");
-	  exit(-1);
-  }
-
   for (i = 1; i < argc; i++) {
     if (!strcmp (argv[i], "-c")) {
       command = argv[i+1];
@@ -2335,29 +1776,11 @@ main (int argc, char** argv)
       CHECK_ARGC (argc, argv, i);
       idle_timeout = atoi(argv[i+1]);
       rfbPurgeArguments(&argc, &i, 2, argv); i--;
-    } else if (!strcmp (argv[i], "-authpath")) {
-      CHECK_ARGC (argc, argv, i);
-      auth_path = argv[i+1];
-      rfbPurgeArguments(&argc, &i, 2, argv); i--;
-    } else if (!strcmp (argv[i], "-perm")) {
-      CHECK_ARGC (argc, argv, i);
-      auth_perm = argv[i+1];
-      rfbPurgeArguments(&argc, &i, 2, argv); i--;
-    } else if (!strcmp (argv[i], "-notls")) {
-        rfbPurgeArguments(&argc, &i, 1, argv); i--;
-        if ((vncticket = getenv("PVE_VNC_TICKET")) == NULL) {
-          fprintf(stderr, "missing env PVE_VNC_TICKET (-notls)\n");
-	  exit(-1);           
-        }
-    }
+    } 
   }
-
-  unsetenv("PVE_VNC_TICKET"); // do not expose this to child
 
 #ifdef DEBUG
   rfbLogEnable (1);
-  gnutls_global_set_log_level(10);
-  gnutls_global_set_log_function(vnc_debug_gnutls_log);
 #else
   rfbLogEnable (0);
 #endif

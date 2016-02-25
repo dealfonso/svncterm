@@ -1,10 +1,10 @@
 =head1 NAME
                                           
-vncterm - VNC Terminal Emulator
+svncterm - Simple VNC Terminal Emulator
 
 =head1 SYNOPSIS
 
-vncterm [VNCOPTS] [-c command [ARGS]] 
+svncterm [VNCOPTS] [-c command [ARGS]] 
 
 =head1 DESCRIPTION
 
@@ -13,9 +13,14 @@ to the VNC clients. Implements a 'xterm' compatible terminal.
 
 =head1 SEE ALSO
 
-       x11vnc(1).
+       x11vnc(1), vncterm (https://github.com/proxmox/vncterm)
 
 =head1 AUTHOR
+
+Carlos de Alfonso <caralla@upv.es>
+
+Simplifications from the original vncterm, to remove tls requirements thus
+enabling the usage of non-patched versions of libvncserver and others.
 
 Dietmar Maurer <dietmar@proxmox.com>
 
@@ -24,9 +29,12 @@ this work.
 
 =head1 COPYRIGHT AND DISCLAIMER
 
+Copyright (C) 2016 Universitat Politecnica de Valencia
+* Removing the usage of TLS and the need of patched versions of libraries
+
 Copyright (C) 2007 Proxmox Server Solutions GmbH
 
-Copyright: vncterm is under GNU GPL, the GNU General Public License.
+Copyright: svncterm is under GNU GPL, the GNU General Public License.
 
 This program is free software; you can redistribute it and/or modify
 it under the terms of the GNU General Public License as published by
