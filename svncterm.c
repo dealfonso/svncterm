@@ -1652,7 +1652,12 @@ new_client (rfbClientPtr client)
   return RFB_CLIENT_ACCEPT;
 }
 
-static void rfbVncAuthSendChallenge(rfbClientPtr cl)
+/*
+ * Send the authentication challenge.
+ */
+
+static void
+rfbVncAuthSendChallenge(rfbClientPtr cl)
 {
 	
     /* 4 byte header is alreay sent. Which is rfbSecTypeVncAuth 
@@ -1668,11 +1673,68 @@ static void rfbVncAuthSendChallenge(rfbClientPtr cl)
     cl->state = RFB_AUTHENTICATION;
 }
 
+/*
+ * Send the NO AUTHENTICATION. SCARR
+ */
+
+static void
+rfbVncAuthNone(rfbClientPtr cl)
+{
+    uint32_t authResult;
+
+    if (cl->protocolMajorVersion==3 && cl->protocolMinorVersion > 7) {
+        rfbLog("rfbProcessClientSecurityType: returning securityResult for client rfb version >= 3.8\n");
+        authResult = Swap32IfLE(rfbVncAuthOK);
+        if (rfbWriteExact(cl, (char *)&authResult, 4) < 0) {
+            rfbLogPerror("rfbAuthProcessClientMessage: write");
+            rfbCloseClient(cl);
+            return;
+        }
+    }
+    cl->state = RFB_INITIALISATION;
+    return;
+}
+
+
+/*
+ * Advertise the supported security types (protocol 3.7). Here before sending 
+ * the list of security types to the client one more security type is added 
+ * to the list if primaryType is not set to rfbSecTypeInvalid. This security
+ * type is the standard vnc security type which does the vnc authentication
+ * or it will be security type for no authentication.
+ * Different security types will be added by applications using this library.
+ */
+
 static rfbSecurityHandler VncSecurityHandlerVncAuth = {
     rfbSecTypeVncAuth,
     rfbVncAuthSendChallenge,
     NULL
 };
+
+static rfbSecurityHandler VncSecurityHandlerNone = {
+    rfbSecTypeNone,
+    rfbVncAuthNone,
+    NULL
+};
+
+rfbBool CheckPasswordByList(rfbClientPtr cl,const char* response,int len) {
+  char **passwds;
+  int i=0;
+
+  for(passwds=(char**)cl->screen->authPasswdData;*passwds;passwds++,i++) {
+    uint8_t auth_tmp[CHALLENGESIZE];
+    memcpy((char *)auth_tmp, (char *)cl->authChallenge, CHALLENGESIZE);
+    rfbEncryptBytes(auth_tmp, *passwds);
+
+    if (memcmp(auth_tmp, response, len) == 0) {
+      if(i>=cl->screen->authPasswdFirstViewOnly)
+	cl->viewOnly=TRUE;
+      return(TRUE);
+    }
+  }
+  // Missed return value and so accepted invalid passwords
+  return (FALSE);
+}
 
 vncTerm *
 create_vncterm (int argc, char** argv, int maxx, int maxy)
@@ -1751,8 +1813,16 @@ create_vncterm (int argc, char** argv, int maxx, int maxy)
   //screen->autoPort = 1;
 
   rfbInitServer(screen);
-  
-  rfbRegisterSecurityHandler(&VncSecurityHandlerVncAuth);
+ 
+  if (screen->authPasswdData && strcmp(((char**)screen->authPasswdData)[0], "")) {
+        screen->passwordCheck = CheckPasswordByList;
+  	rfbRegisterSecurityHandler(&VncSecurityHandlerVncAuth);
+  }
+  else {
+	screen->authPasswdData = NULL;
+        screen->passwordCheck = NULL;
+        rfbRegisterSecurityHandler(&VncSecurityHandlerNone);
+  }
 
   return vt;
 }
