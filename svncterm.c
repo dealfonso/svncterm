@@ -47,20 +47,6 @@
 //#define DEBUG
 
 #define DH_BITS 1024
-void rfbEncodeU32(char *buf, uint32_t value)
-{
-    buf[0] = (value >> 24) & 0xFF;
-    buf[1] = (value >> 16) & 0xFF;
-    buf[2] = (value >>  8) & 0xFF;
-    buf[3] = value & 0xFF;
-}
-
-uint32_t rfbDecodeU32(char *data, size_t offset)
-{
-	return ((data[offset] << 24) | (data[offset + 1] << 16) |
-		(data[offset + 2] << 8) | data[offset + 3]);
-}
-
 #define TERM "xterm"
 
 #define TERMIDCODE "[?1;2c" // vt100 ID
@@ -1666,6 +1652,28 @@ new_client (rfbClientPtr client)
   return RFB_CLIENT_ACCEPT;
 }
 
+static void rfbVncAuthSendChallenge(rfbClientPtr cl)
+{
+	
+    /* 4 byte header is alreay sent. Which is rfbSecTypeVncAuth 
+       (same as rfbVncAuth). Just send the challenge. */
+    rfbRandomBytes(cl->authChallenge);
+    if (rfbWriteExact(cl, (char *)cl->authChallenge, CHALLENGESIZE) < 0) {
+        rfbLogPerror("rfbAuthNewClient: write");
+        rfbCloseClient(cl);
+        return;
+    }
+    
+    /* Dispatch client input to rfbVncAuthProcessResponse. */
+    cl->state = RFB_AUTHENTICATION;
+}
+
+static rfbSecurityHandler VncSecurityHandlerVncAuth = {
+    rfbSecTypeVncAuth,
+    rfbVncAuthSendChallenge,
+    NULL
+};
+
 vncTerm *
 create_vncterm (int argc, char** argv, int maxx, int maxy)
 {
@@ -1743,6 +1751,8 @@ create_vncterm (int argc, char** argv, int maxx, int maxy)
   //screen->autoPort = 1;
 
   rfbInitServer(screen);
+  
+  rfbRegisterSecurityHandler(&VncSecurityHandlerVncAuth);
 
   return vt;
 }
