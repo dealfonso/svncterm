@@ -1,5 +1,6 @@
 #!/bin/bash
 yum install git wget zlib-devel libvncserver-devel gnutls-devel libjpeg-devel -y
+yum groupinstall -y "Development tools"
 git clone https://github.com/dealfonso/svncterm.git
 cd svncterm
 wget https://raw.githubusercontent.com/proxmox/vncterm/master/glyphs.h
