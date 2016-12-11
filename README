@@ -8,7 +8,7 @@ enabling the usage of non-patched versions of libvncserver and others.
 IMPORTANT: In this version there is not any need for patches for the external libraries.
 
 * Compile this app
-apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y make build-essential zlib1g-dev console-data quilt libgnutls-dev libjpeg-dev libvncserver-dev
+apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y make build-essential zlib1g-dev console-data quilt libgnutls28-dev libjpeg-dev libvncserver-dev lintian 
 git clone https://github.com/dealfonso/svncterm
 cd svncterm/
 make
