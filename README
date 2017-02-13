@@ -13,6 +13,13 @@ git clone https://github.com/dealfonso/svncterm
 cd svncterm/
 make
 
+* Take care of the packages that are appropriate for your distribution (In the case of Debian Jessie):
+
+apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y make build-essential zlib1g-dev console-data quilt libgnutls28-dev libjpeg-dev libvncserver-dev lintian 
+git clone https://github.com/dealfonso/svncterm
+cd svncterm/
+make
+
 * Make the redistributable .deb file by using this command:
 $ make deb
 
